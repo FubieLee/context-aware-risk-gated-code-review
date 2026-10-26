@@ -1,3 +1,11 @@
+export interface Review {
+    lgtm: boolean;
+    review_comment: string;
+    hunk_header?: string;
+}
+export declare class InvalidReviewResponseError extends Error {
+    constructor(reason: string);
+}
 export declare class Chat {
     private openai;
     private isAzure;
@@ -10,13 +18,5 @@ export declare class Chat {
     private get isReasoningModel();
     private get reasoningEffortOption();
     private generatePrompt;
-    codeReview: (patch: string) => Promise<Array<{
-        lgtm: boolean;
-        review_comment: string;
-        hunk_header?: string;
-    }> | {
-        lgtm: boolean;
-        review_comment: string;
-        hunk_header?: string;
-    }>;
+    codeReview: (patch: string) => Promise<Review[] | Review>;
 }

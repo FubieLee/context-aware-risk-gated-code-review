@@ -147360,10 +147360,51 @@ const matchPatterns = (patterns, path) => {
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.Chat = void 0;
+exports.Chat = exports.InvalidReviewResponseError = void 0;
 const openai_1 = __nccwpck_require__(60047);
 const reasoningEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 const isReasoningEffort = (effort) => reasoningEfforts.includes(effort);
+class InvalidReviewResponseError extends Error {
+    constructor(reason) {
+        super(`Invalid model review response: ${reason}.`);
+        this.name = 'InvalidReviewResponseError';
+    }
+}
+exports.InvalidReviewResponseError = InvalidReviewResponseError;
+const isRecord = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
+const isReview = (value) => {
+    if (!isRecord(value) ||
+        typeof value.lgtm !== 'boolean' ||
+        typeof value.review_comment !== 'string' ||
+        (value.hunk_header !== undefined && typeof value.hunk_header !== 'string')) {
+        return false;
+    }
+    // A finding needs an explanation; an LGTM must not hide one from the caller.
+    return value.lgtm
+        ? value.review_comment.trim().length === 0
+        : value.review_comment.trim().length > 0;
+};
+const parseReviewResponse = (content) => {
+    let json;
+    try {
+        json = JSON.parse(content);
+    }
+    catch {
+        throw new InvalidReviewResponseError('expected valid JSON');
+    }
+    if (isRecord(json) && 'reviews' in json) {
+        const reviews = json.reviews;
+        if (Array.isArray(reviews) && reviews.every(isReview)) {
+            // An explicit empty array means no findings, unlike an empty API response.
+            return reviews;
+        }
+    }
+    else if (isReview(json)) {
+        // Keep compatibility with the original single-review response format.
+        return json;
+    }
+    throw new InvalidReviewResponseError('expected a review or a reviews array with valid fields');
+};
 class Chat {
     openai;
     isAzure;
@@ -147426,6 +147467,7 @@ class Chat {
             '  ]\n' +
             '}\n' +
             'Review each hunk (marked by @@) separately and provide feedback for hunks that need improvement.\n' +
+            'If no hunks need improvement, return {"reviews": []}.\n' +
             'Ensure your response is a valid JSON object with a reviews array.\n';
         return `${userPrompt}${jsonFormatRequirement} ${answerLanguage}:
     ${patch}
@@ -147456,30 +147498,19 @@ class Chat {
             max_tokens: process.env.max_tokens ? +process.env.max_tokens : undefined,
             ...this.reasoningEffortOption,
             response_format: { type: "json_object" },
-        });
-        console.timeEnd('code-review cost');
-        if (res.choices.length) {
-            try {
-                const json = JSON.parse(res.choices[0].message.content || "");
-                // If response has a 'reviews' array, return it directly
-                if (json.reviews && Array.isArray(json.reviews)) {
-                    return json.reviews;
-                }
-                // Otherwise, treat as a single review response
-                return json;
-            }
-            catch (e) {
-                return {
-                    lgtm: false,
-                    hunk_header: patch.split('\n')[0].startsWith('@@') ? patch.split('\n')[0] : undefined,
-                    review_comment: res.choices[0].message.content || ""
-                };
-            }
+        }).finally(() => console.timeEnd('code-review cost'));
+        const choice = res.choices?.[0];
+        if (!choice?.message) {
+            throw new InvalidReviewResponseError('no completion choice');
         }
-        return {
-            lgtm: true,
-            review_comment: ""
-        };
+        if (choice.finish_reason !== 'stop' || choice.message.refusal) {
+            throw new InvalidReviewResponseError('generation did not finish normally');
+        }
+        const content = choice.message.content;
+        if (typeof content !== 'string' || !content.trim()) {
+            throw new InvalidReviewResponseError('empty completion content');
+        }
+        return parseReviewResponse(content);
     };
 }
 exports.Chat = Chat;
